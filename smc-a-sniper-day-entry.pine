@@ -1,0 +1,363 @@
+//@version=6
+indicator("SMC A+ Sniper Day Entry", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=120)
+
+//=========================
+// Inputs
+//=========================
+use15mOnly         = input.bool(true, "Lock To 15m")
+dayFastLen         = input.int(50, "1D Fast EMA", minval=1)
+daySlowLen         = input.int(200, "1D Slow EMA", minval=1)
+
+h1FastLen          = input.int(50, "1H Fast EMA", minval=1)
+h1SlowLen          = input.int(200, "1H Slow EMA", minval=1)
+h1RsiLen           = input.int(14, "1H RSI", minval=1)
+
+m15FastLen         = input.int(50, "15m Fast EMA", minval=1)
+m15SlowLen         = input.int(200, "15m Slow EMA", minval=1)
+m15RsiLen          = input.int(14, "15m RSI", minval=1)
+atrLen             = input.int(14, "ATR Length", minval=1)
+swingLen           = input.int(8, "Swing Length", minval=2)
+
+minFvgAtr          = input.float(0.20, "Min FVG ATR", step=0.05)
+minDispAtr         = input.float(0.90, "Min Displacement ATR", step=0.05)
+slBufferAtr        = input.float(0.20, "SL Buffer ATR", step=0.05)
+rr                 = input.float(3.0, "Risk Reward", step=0.1)
+scoreThreshold     = input.int(7, "A+ Score Threshold", minval=5, maxval=8)
+cooldownBars       = input.int(8, "Cooldown Bars", minval=0)
+
+useLondon          = input.bool(true, "Use London Killzone")
+londonSession      = input.session("1330-1700", "London Session")
+useNewYork         = input.bool(true, "Use New York Killzone")
+newYorkSession     = input.session("1830-2130", "New York Session")
+sessionTz          = input.string("UTC+6:30", "Session Timezone")
+
+showPanel          = input.bool(true, "Show Panel")
+showEMAs           = input.bool(true, "Show 15m EMAs")
+showBoxes          = input.bool(true, "Show FVG Box")
+showHistory        = input.bool(true, "Show Entry History")
+historyBars        = input.int(60, "History Length", minval=10, maxval=300)
+maxHistoryTrades   = input.int(30, "Max History Trades", minval=1, maxval=100)
+showStructure      = input.bool(true, "Show Sweep / CHOCH")
+
+//=========================
+// Guards
+//=========================
+is15m = timeframe.period == "15"
+canRun = not use15mOnly or is15m
+
+if not canRun and barstate.islast
+    var table warn = table.new(position.middle_center, 1, 1)
+    table.cell(warn, 0, 0, "Use 15m chart only", bgcolor=color.red, text_color=color.white)
+
+//=========================
+// 15m Core
+//=========================
+emaFast = ta.ema(close, m15FastLen)
+emaSlow = ta.ema(close, m15SlowLen)
+rsi     = ta.rsi(close, m15RsiLen)
+atr     = ta.atr(atrLen)
+
+plot(showEMAs and canRun ? emaFast : na, "15m EMA 50", color=color.orange, linewidth=2)
+plot(showEMAs and canRun ? emaSlow : na, "15m EMA 200", color=color.new(color.gray, 20), linewidth=2)
+
+//=========================
+// 1D Trend
+//=========================
+dClose = request.security(syminfo.tickerid, "D", close)
+dFast  = request.security(syminfo.tickerid, "D", ta.ema(close, dayFastLen))
+dSlow  = request.security(syminfo.tickerid, "D", ta.ema(close, daySlowLen))
+
+dayBull = dClose > dFast and dFast > dSlow
+dayBear = dClose < dFast and dFast < dSlow
+
+//=========================
+// 1H Bias
+//=========================
+h1Close = request.security(syminfo.tickerid, "60", close)
+h1Fast  = request.security(syminfo.tickerid, "60", ta.ema(close, h1FastLen))
+h1Slow  = request.security(syminfo.tickerid, "60", ta.ema(close, h1SlowLen))
+h1Rsi   = request.security(syminfo.tickerid, "60", ta.rsi(close, h1RsiLen))
+
+h1Bull = h1Close > h1Fast and h1Fast > h1Slow and h1Rsi > 55
+h1Bear = h1Close < h1Fast and h1Fast < h1Slow and h1Rsi < 45
+
+//=========================
+// Killzone
+//=========================
+inLondon  = not na(time(timeframe.period, londonSession + ":1234567", sessionTz))
+inNewYork = not na(time(timeframe.period, newYorkSession + ":1234567", sessionTz))
+sessionOk = (useLondon and inLondon) or (useNewYork and inNewYork)
+
+//=========================
+// 15m Structure
+//=========================
+pivotHigh = ta.pivothigh(high, swingLen, swingLen)
+pivotLow  = ta.pivotlow(low, swingLen, swingLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+
+if not na(pivotHigh)
+    lastSwingHigh := pivotHigh
+
+if not na(pivotLow)
+    lastSwingLow := pivotLow
+
+bullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+
+bullChoch = bullSweep[1] and not na(lastSwingHigh) and close > lastSwingHigh
+bearChoch = bearSweep[1] and not na(lastSwingLow) and close < lastSwingLow
+
+if showStructure and bullSweep
+    label.new(bar_index, low, "Sweep Low", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny)
+
+if showStructure and bearSweep
+    label.new(bar_index, high, "Sweep High", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+
+//=========================
+// Premium / Discount
+//=========================
+rangeTop = ta.highest(high, 50)
+rangeBottom = ta.lowest(low, 50)
+eq = math.avg(rangeTop, rangeBottom)
+
+inDiscount = close < eq
+inPremium  = close > eq
+
+//=========================
+// Displacement
+//=========================
+candleRange = high - low
+candleBody  = math.abs(close - open)
+
+bullDisplacement = close > open and candleRange > atr * minDispAtr and candleBody > candleRange * 0.60
+bearDisplacement = close < open and candleRange > atr * minDispAtr and candleBody > candleRange * 0.60
+
+//=========================
+// FVG
+//=========================
+bullFvg = high[2] < low
+bearFvg = low[2] > high
+
+bullGap = low - high[2]
+bearGap = low[2] - high
+
+validBullFvg = bullFvg and bullGap > atr * minFvgAtr
+validBearFvg = bearFvg and bearGap > atr * minFvgAtr
+
+var float bullFvgTop = na
+var float bullFvgBottom = na
+var int bullFvgBar = na
+var bool bullReady = false
+
+var float bearFvgTop = na
+var float bearFvgBottom = na
+var int bearFvgBar = na
+var bool bearReady = false
+
+trendBull15 = close > emaFast and emaFast > emaSlow and rsi > 55
+trendBear15 = close < emaFast and emaFast < emaSlow and rsi < 45
+
+bullSetup = canRun and sessionOk and dayBull and h1Bull and trendBull15 and bullChoch[1] and bullDisplacement and validBullFvg
+bearSetup = canRun and sessionOk and dayBear and h1Bear and trendBear15 and bearChoch[1] and bearDisplacement and validBearFvg
+
+if bullSetup
+    bullFvgTop := low
+    bullFvgBottom := high[2]
+    bullFvgBar := bar_index
+    bullReady := true
+    bearReady := false
+
+if bearSetup
+    bearFvgTop := low[2]
+    bearFvgBottom := high
+    bearFvgBar := bar_index
+    bearReady := true
+    bullReady := false
+
+bullRetest = bullReady and bar_index > bullFvgBar and low <= bullFvgTop and low >= bullFvgBottom and close > bullFvgBottom
+bearRetest = bearReady and bar_index > bearFvgBar and high >= bearFvgBottom and high <= bearFvgTop and close < bearFvgTop
+
+bullConfirm = bullRetest and close > open and close > high[1]
+bearConfirm = bearRetest and close < open and close < low[1]
+
+//=========================
+// A+ Score
+//=========================
+bullScore = 0
+bullScore += dayBull ? 1 : 0
+bullScore += h1Bull ? 1 : 0
+bullScore += trendBull15 ? 1 : 0
+bullScore += bullSweep ? 1 : 0
+bullScore += bullChoch ? 1 : 0
+bullScore += bullDisplacement ? 1 : 0
+bullScore += validBullFvg ? 1 : 0
+bullScore += inDiscount and bullConfirm ? 1 : 0
+
+bearScore = 0
+bearScore += dayBear ? 1 : 0
+bearScore += h1Bear ? 1 : 0
+bearScore += trendBear15 ? 1 : 0
+bearScore += bearSweep ? 1 : 0
+bearScore += bearChoch ? 1 : 0
+bearScore += bearDisplacement ? 1 : 0
+bearScore += validBearFvg ? 1 : 0
+bearScore += inPremium and bearConfirm ? 1 : 0
+
+//=========================
+// Cooldown
+//=========================
+var int lastSignalBar = na
+cooldownOk = na(lastSignalBar) or (bar_index - lastSignalBar > cooldownBars)
+
+//=========================
+// Final Signals
+//=========================
+longSignal  = canRun and bullConfirm and bullScore >= scoreThreshold and cooldownOk
+shortSignal = canRun and bearConfirm and bearScore >= scoreThreshold and cooldownOk
+
+if longSignal or shortSignal
+    lastSignalBar := bar_index
+
+if longSignal
+    bullReady := false
+
+if shortSignal
+    bearReady := false
+
+//=========================
+// Levels
+//=========================
+longSL   = math.min(low, low[1], low[2]) - atr * slBufferAtr
+longRisk = close - longSL
+longTP   = close + longRisk * rr
+
+shortSL   = math.max(high, high[1], high[2]) + atr * slBufferAtr
+shortRisk = shortSL - close
+shortTP   = close - shortRisk * rr
+
+//=========================
+// History storage
+//=========================
+var array<line> historyEntryLines = array.new<line>()
+var array<line> historySlLines    = array.new<line>()
+var array<line> historyTpLines    = array.new<line>()
+var array<label> historyEntryLbls = array.new<label>()
+var array<label> historySlLbls    = array.new<label>()
+var array<label> historyTpLbls    = array.new<label>()
+
+trimLineArray(arr) =>
+    while array.size(arr) > maxHistoryTrades
+        old = array.shift(arr)
+        line.delete(old)
+
+trimLabelArray(arr) =>
+    while array.size(arr) > maxHistoryTrades
+        old = array.shift(arr)
+        label.delete(old)
+
+trimHistory() =>
+    trimLineArray(historyEntryLines)
+    trimLineArray(historySlLines)
+    trimLineArray(historyTpLines)
+    trimLabelArray(historyEntryLbls)
+    trimLabelArray(historySlLbls)
+    trimLabelArray(historyTpLbls)
+
+//=========================
+// Visuals
+//=========================
+plotshape(longSignal, title="BUY", style=shape.labelup, location=location.belowbar, color=color.green, text="BUY", textcolor=color.white, size=size.small)
+plotshape(shortSignal, title="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, text="SELL", textcolor=color.white, size=size.small)
+
+if showBoxes and bullReady and not na(bullFvgTop) and not na(bullFvgBottom)
+    box.new(bullFvgBar - 2, bullFvgTop, bar_index + 4, bullFvgBottom, bgcolor=color.new(color.green, 88), border_color=color.new(color.green, 30))
+
+if showBoxes and bearReady and not na(bearFvgTop) and not na(bearFvgBottom)
+    box.new(bearFvgBar - 2, bearFvgTop, bar_index + 4, bearFvgBottom, bgcolor=color.new(color.red, 88), border_color=color.new(color.red, 30))
+
+if showHistory and longSignal
+    array.push(historyEntryLines, line.new(bar_index, close, bar_index + historyBars, close, color=color.white, width=2))
+    array.push(historySlLines, line.new(bar_index, longSL, bar_index + historyBars, longSL, color=color.red, style=line.style_dashed))
+    array.push(historyTpLines, line.new(bar_index, longTP, bar_index + historyBars, longTP, color=color.green, style=line.style_dashed))
+    array.push(historyEntryLbls, label.new(bar_index, close, "BUY\n" + str.tostring(close, "#.##"), style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small))
+    array.push(historySlLbls, label.new(bar_index, longSL, "SL\n" + str.tostring(longSL, "#.##"), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.small))
+    array.push(historyTpLbls, label.new(bar_index, longTP, "TP 1:3\n" + str.tostring(longTP, "#.##"), style=label.style_label_left, color=color.green, textcolor=color.white, size=size.small))
+    trimHistory()
+
+if showHistory and shortSignal
+    array.push(historyEntryLines, line.new(bar_index, close, bar_index + historyBars, close, color=color.white, width=2))
+    array.push(historySlLines, line.new(bar_index, shortSL, bar_index + historyBars, shortSL, color=color.red, style=line.style_dashed))
+    array.push(historyTpLines, line.new(bar_index, shortTP, bar_index + historyBars, shortTP, color=color.red, style=line.style_dashed))
+    array.push(historyEntryLbls, label.new(bar_index, close, "SELL\n" + str.tostring(close, "#.##"), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small))
+    array.push(historySlLbls, label.new(bar_index, shortSL, "SL\n" + str.tostring(shortSL, "#.##"), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.small))
+    array.push(historyTpLbls, label.new(bar_index, shortTP, "TP 1:3\n" + str.tostring(shortTP, "#.##"), style=label.style_label_left, color=color.red, textcolor=color.white, size=size.small))
+    trimHistory()
+
+//=========================
+// Original-style live status label
+//=========================
+if barstate.islast
+    var label mainLabel = label.new(bar_index, high, "", style=label.style_label_down, textcolor=color.white)
+
+    float sl = na
+    float tp = na
+    string txt = ""
+    color col = color.gray
+
+    if not sessionOk
+        txt := "OFF-SESSION ☕"
+    else if longSignal
+        sl := longSL
+        tp := longTP
+        txt := "LONG 🟢\nSL: " + str.tostring(sl, "#.##") + "\nTP: " + str.tostring(tp, "#.##")
+        col := color.green
+    else if shortSignal
+        sl := shortSL
+        tp := shortTP
+        txt := "SHORT 🔴\nSL: " + str.tostring(sl, "#.##") + "\nTP: " + str.tostring(tp, "#.##")
+        col := color.red
+    else
+        txt := "SCANNING... 🔍"
+        col := color.blue
+
+    label.set_x(mainLabel, bar_index)
+    label.set_y(mainLabel, high)
+    label.set_text(mainLabel, txt)
+    label.set_color(mainLabel, col)
+
+//=========================
+// Alerts
+//=========================
+if longSignal
+    alert("SMC A+ BUY | Entry: " + str.tostring(close, "#.##") + " | SL: " + str.tostring(longSL, "#.##") + " | TP 1:3: " + str.tostring(longTP, "#.##"), alert.freq_once_per_bar_close)
+
+if shortSignal
+    alert("SMC A+ SELL | Entry: " + str.tostring(close, "#.##") + " | SL: " + str.tostring(shortSL, "#.##") + " | TP 1:3: " + str.tostring(shortTP, "#.##"), alert.freq_once_per_bar_close)
+
+alertcondition(longSignal, "SMC A+ Buy", "SMC A+ Buy signal")
+alertcondition(shortSignal, "SMC A+ Sell", "SMC A+ Sell signal")
+
+//=========================
+// Panel
+//=========================
+var table panel = table.new(position.top_right, 1, 1, border_width=1)
+
+dTxt = dayBull ? "1D BULL" : dayBear ? "1D BEAR" : "1D NEUTRAL"
+hTxt = h1Bull ? "1H BULL" : h1Bear ? "1H BEAR" : "1H NEUTRAL"
+sTxt = inLondon ? "LONDON" : inNewYork ? "NEW YORK" : "OFF"
+
+statusText =
+     "SMC A+ Sniper Day Entry" +
+     "\n1D: " + dTxt +
+     "\n1H: " + hTxt +
+     "\nSession: " + sTxt +
+     "\nBull Score: " + str.tostring(bullScore) + "/8" +
+     "\nBear Score: " + str.tostring(bearScore) + "/8" +
+     "\nHistory: " + (showHistory ? "ON" : "OFF")
+
+panelColor = longSignal ? color.green : shortSignal ? color.red : color.blue
+
+if showPanel and barstate.islast
+    table.cell(panel, 0, 0, statusText, bgcolor=color.new(panelColor, 10), text_color=color.white)
